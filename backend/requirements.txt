@@ -1,0 +1,40 @@
+# Core Backend Framework
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pydantic>=2.0
+pydantic-settings>=2.0
+
+# Environment Variable Loading
+python-dotenv>=1.0.0
+
+# OpenAI LLM Integration
+openai>=1.3.0
+
+# --- Implementation Dependencies ---
+
+# Parsing
+pypdf>=4.0.0 # PDF parsing (successor to PyPDF2)
+python-docx>=1.1.0 # DOCX parsing
+pdf2image>=1.16.0
+# python-pptx # Add if needed
+# openpyxl # Add if needed
+
+# OCR
+pillow>=9.5.0 # Image handling
+pytesseract>=0.3.10 # Tesseract wrapper
+
+# Web Crawling
+requests>=2.28.0
+beautifulsoup4>=4.12.0
+# lxml # Optional: Faster HTML parsing with bs4
+
+# Embeddings & Vector Store
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4 # Use faiss-gpu if you have CUDA setup
+numpy>=1.22.0 # Required by FAISS and sentence-transformers
+
+# Text processing / Utilities
+nltk>=3.8 # For basic text splitting (sentence tokenization)
+# regex # Potentially better regex handling than standard 're'
+
