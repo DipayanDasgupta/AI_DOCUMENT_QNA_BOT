@@ -26,6 +26,7 @@ pytesseract>=0.3.10 # Tesseract wrapper
 # Web Crawling
 requests>=2.28.0
 beautifulsoup4>=4.12.0
+trafilatura>=1.8.0
 # lxml # Optional: Faster HTML parsing with bs4
 
 # Embeddings & Vector Store
