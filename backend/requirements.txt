@@ -38,3 +38,4 @@ numpy>=1.22.0 # Required by FAISS and sentence-transformers
 nltk>=3.8 # For basic text splitting (sentence tokenization)
 # regex # Potentially better regex handling than standard 're'
 
+opencv-python-headless>=4.5.0
