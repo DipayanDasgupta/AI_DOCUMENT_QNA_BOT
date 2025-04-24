@@ -144,3 +144,5 @@ tessdata/
 .vscode/
 *.swp
 *.swo
+data/index_store/
+data/index_store/*.json

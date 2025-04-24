@@ -8,8 +8,7 @@ pydantic-settings>=2.0
 # Environment Variable Loading
 python-dotenv>=1.0.0
 
-# OpenAI LLM Integration
-openai>=1.3.0
+google-generativeai>=0.4.0 # Google Gemini
 
 # --- Implementation Dependencies ---
 

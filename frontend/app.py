@@ -1,4 +1,3 @@
-# PASTE THE ENTIRE CORRECTED PYTHON CODE HERE
 # frontend/app.py
 
 import streamlit as st
@@ -11,8 +10,50 @@ from io import BytesIO
 
 # --- Configuration ---
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000") # Default to local backend
-UPLOAD_ENDPOINT = f"{BACKEND_URL}/api/v1/upload" # Corrected endpoint
-ASK_ENDPOINT = f"{BACKEND_URL}/api/v1/ask"       # Corrected endpoint
+UPLOAD_ENDPOINT = f"{BACKEND_URL}/api/v1/upload" # Corrected endpoint prefix
+ASK_ENDPOINT = f"{BACKEND_URL}/api/v1/ask"       # Corrected endpoint prefix
+
+# --- Set Page Config FIRST ---
+# Must be the first Streamlit command executed
+st.set_page_config(page_title="AI Document Q&A", layout="wide")
+
+# --- Custom CSS for Aesthetics ---
+st.markdown("""
+<style>
+    /* Style for user messages */
+    div[data-testid="stChatMessage"][class*="user"] {
+        background-color: #e6f7ff; /* Light blue background */
+        border-radius: 10px;
+        padding: 10px;
+        border: 1px solid #91d5ff;
+        margin-bottom: 10px; /* Add space below user message */
+    }
+    /* Style for assistant messages */
+    div[data-testid="stChatMessage"][class*="assistant"] {
+        background-color: #f0f0f0; /* Light grey background */
+        border-radius: 10px;
+        padding: 10px;
+        border: 1px solid #d9d9d9;
+        margin-bottom: 10px; /* Add space below assistant message */
+    }
+    /* Smaller font for sources */
+    .stCaption {
+        font-size: 0.85em;
+        color: #555; /* Darker grey */
+    }
+    /* Style the expander for sources */
+    .stExpander {
+        border: none !important; /* Remove default border */
+        margin-top: -5px; /* Adjust spacing */
+    }
+    .stExpander header {
+        font-size: 0.9em;
+        color: #333;
+        padding: 2px 0px !important; /* Adjust padding */
+    }
+
+</style>
+""", unsafe_allow_html=True)
 
 # --- Helper Functions ---
 
@@ -20,12 +61,13 @@ def display_sources(sources):
     """Displays the sources list, possibly in an expander."""
     if sources:
         with st.expander("View Sources", expanded=False):
+            st.markdown(f"**Answer derived from ({len(sources)} sources):**")
             for i, source in enumerate(sources):
-                st.caption(f"{i+1}. {source}") # Numbered list
+                st.caption(f"- {source}") # Numbered list
+
 
 # --- Streamlit App ---
-
-st.set_page_config(page_title="AI Document Q&A", layout="wide")
+# Title and markdown now come AFTER set_page_config
 st.title("📄 AI Document Q&A System")
 st.markdown("Upload your documents (PDF, DOCX, PPTX, XLSX, CSV, JSON, TXT, PNG, JPG), then ask questions!")
 
@@ -33,10 +75,13 @@ st.markdown("Upload your documents (PDF, DOCX, PPTX, XLSX, CSV, JSON, TXT, PNG, 
 if "session_id" not in st.session_state:
     st.session_state.session_id = None
 if "files_ready_for_chat" not in st.session_state:
-    # Use a more descriptive state name for enabling chat
     st.session_state.files_ready_for_chat = False
+if "upload_status_message" not in st.session_state:
+    st.session_state.upload_status_message = ""
+if "upload_status_type" not in st.session_state:
+    st.session_state.upload_status_type = "info"
 if "messages" not in st.session_state:
-    st.session_state.messages = [] # Store chat history {role: "user/assistant", content: "...", type: "text/table/chart/error", data: {...}, sources: [...]}
+    st.session_state.messages = []
 if "uploaded_file_names" not in st.session_state:
     st.session_state.uploaded_file_names = []
 
@@ -49,109 +94,95 @@ with st.sidebar:
         "Choose files",
         accept_multiple_files=True,
         type=["pdf", "docx", "pptx", "xlsx", "csv", "json", "txt", "png", "jpg", "jpeg"],
-        key="file_uploader" # Use a key to help manage state
+        key="file_uploader"
     )
 
-    # Check if new files have been uploaded by comparing names
     current_file_names = sorted([f.name for f in uploaded_files]) if uploaded_files else []
 
-    # Detect if files were added OR removed (uploader becomes empty)
+    # --- Upload Logic ---
     if current_file_names != st.session_state.uploaded_file_names:
-        print("Detected file change...") # Debug print
-        st.session_state.files_ready_for_chat = False # Reset chat readiness
-        st.session_state.messages = [] # Clear chat history
-        st.session_state.session_id = None # Reset session ID
-        st.session_state.uploaded_file_names = current_file_names # Update the list of names
+        print("Frontend: Detected file change...")
+        st.session_state.files_ready_for_chat = False
+        st.session_state.messages = []
+        st.session_state.session_id = None
+        st.session_state.uploaded_file_names = current_file_names
+        st.session_state.upload_status_message = ""
+        st.session_state.upload_status_type = "info"
 
-        if uploaded_files: # Only process if there are actually files now
-            with st.spinner(f"Uploading {len(uploaded_files)} file(s)... Please wait."):
+        if uploaded_files:
+            with st.spinner(f"Uploading {len(uploaded_files)} file(s)..."):
                 files_to_send = []
                 for uploaded_file in uploaded_files:
-                    # Read file content into BytesIO object for requests
-                    # Using getvalue() is fine for smaller files in Streamlit context
                     files_to_send.append(("files", (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)))
 
-                # --- Corrected try...except block ---
                 try:
-                    print(f"Sending POST to {UPLOAD_ENDPOINT}") # Debug print
-                    response = requests.post(UPLOAD_ENDPOINT, files=files_to_send, timeout=300) # Increased timeout
-                    print(f"Received response: {response.status_code}") # Debug print
-                    response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+                    print(f"Frontend: Sending POST to {UPLOAD_ENDPOINT}")
+                    response = requests.post(UPLOAD_ENDPOINT, files=files_to_send, timeout=300)
+                    print(f"Frontend: Received response status: {response.status_code}")
+                    response.raise_for_status()
 
                     result = response.json()
-                    print(f"Backend JSON response: {result}") # Debug print
+                    print(f"Frontend: Backend JSON response: {result}")
 
-                    # --- Handle Backend Response ---
                     session_id_received = result.get("session_id")
                     backend_status = result.get("status")
                     backend_message = result.get("message")
 
-                    # Check if we got a session_id and a status indicating processing started
-                    if session_id_received and (backend_status == "processing" or backend_status == "success"):
+                    if session_id_received and (backend_status == "processing"):
                         st.session_state.session_id = session_id_received
-                        st.session_state.files_ready_for_chat = True # Enable chat input
-                        # Use the message from backend if available, otherwise provide default
-                        info_msg = backend_message or "Files accepted. Processing started in background."
-                        st.info(f"⏳ {info_msg} (Session: {st.session_state.session_id}). You can ask questions now.")
-
-                    else: # Handle explicit failure from backend JSON or unexpected response
-                        error_message = backend_message or "Unknown error during file processing initiation (Invalid backend response)."
-                        st.error(f"❌ File processing initiation failed: {error_message}")
-                        # Reset states fully on failure
-                        st.session_state.files_ready_for_chat = False
-                        st.session_state.uploaded_file_names = []
-                        st.session_state.session_id = None
+                        st.session_state.files_ready_for_chat = True
+                        st.session_state.upload_status_message = backend_message or "Files accepted. Processing started..."
+                        st.session_state.upload_status_type = "info"
+                        print(f"Frontend: Upload successful (processing started). Session: {session_id_received}")
+                    else:
+                        error_message = backend_message or "Initiation failed (Invalid backend response)."
+                        st.session_state.upload_status_message = f"❌ File processing initiation failed: {error_message}"
+                        st.session_state.upload_status_type = "error"
 
                 except requests.exceptions.Timeout:
-                     st.error("❌ Upload timed out. The server took too long to respond.")
-                     # Reset states fully on failure
-                     st.session_state.files_ready_for_chat = False
-                     st.session_state.uploaded_file_names = []
-                     st.session_state.session_id = None
+                     st.session_state.upload_status_message = "❌ Upload timed out."
+                     st.session_state.upload_status_type = "error"
+                     st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
                 except requests.exceptions.ConnectionError:
-                     st.error(f"❌ Connection Error: Could not connect to the backend at {BACKEND_URL}. Is the backend running?")
-                     # Reset states fully on failure
-                     st.session_state.files_ready_for_chat = False
-                     st.session_state.uploaded_file_names = []
-                     st.session_state.session_id = None
+                     st.session_state.upload_status_message = f"❌ Connection Error: Cannot connect to backend at {BACKEND_URL}."
+                     st.session_state.upload_status_type = "error"
+                     st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
                 except requests.exceptions.RequestException as e:
-                    # Catch other request errors (like 4xx/5xx handled by raise_for_status)
-                    st.error(f"❌ An error occurred during file upload: {e}")
-                    try:
-                        # Attempt to get more details from the response if available
-                        error_details = response.json().get("message", response.text)
-                        st.error(f"Backend error details: {error_details}")
-                    except Exception:
-                        st.error(f"Could not retrieve specific error details. Status code: {response.status_code if 'response' in locals() else 'N/A'}")
-                    # Reset states fully on failure
-                    st.session_state.files_ready_for_chat = False
-                    st.session_state.uploaded_file_names = []
-                    st.session_state.session_id = None
-                # --- End Corrected try...except block ---
+                    error_msg_detail = f"❌ Upload Error: {e}"
+                    try: error_details = response.json().get("message", response.text)
+                    except Exception: error_details = "(Could not parse error details)"
+                    error_msg_detail += f"\nBackend details: {error_details}"
+                    error_msg_detail += f"\nStatus code: {response.status_code if 'response' in locals() else 'N/A'}"
+                    st.session_state.upload_status_message = error_msg_detail
+                    st.session_state.upload_status_type = "error"
+                    st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
 
-        elif not uploaded_files: # If the uploader is now empty
-            st.info("Upload documents to begin.")
-            # States already reset above
+                # Trigger immediate rerun to display status message
+                st.rerun()
 
-    # Display status/uploaded files if processing *successfully initiated*
-    # files_ready_for_chat is now the gatekeeper for enabling chat
-    if st.session_state.files_ready_for_chat:
-         # Displaying "Files ready" might be premature as processing is background
-         # Maybe just show the uploaded file list
-         # st.success("✅ Files ready for Q&A.") # Keep if preferred
-         if st.session_state.uploaded_file_names:
-             with st.expander("Uploaded Files (Processing Started)"):
-                 for name in st.session_state.uploaded_file_names:
-                     st.caption(name)
+        elif not uploaded_files:
+            st.session_state.upload_status_message = "Upload documents to begin."
+            st.session_state.upload_status_type = "info"
+
+    # --- Display Status & Uploaded Files ---
+    if st.session_state.upload_status_message:
+        if st.session_state.upload_status_type == "info": st.info(st.session_state.upload_status_message, icon="⏳")
+        elif st.session_state.upload_status_type == "success": st.success(st.session_state.upload_status_message, icon="✅")
+        else: st.error(st.session_state.upload_status_message, icon="❌")
+
+    if st.session_state.session_id and st.session_state.uploaded_file_names:
+        with st.expander("Uploaded Files (Processing Started)", expanded=True):
+            for name in st.session_state.uploaded_file_names: st.caption(name)
 
     # Session control button
-    st.markdown("---") # Separator
+    st.markdown("---")
     if st.button("Clear Session & Start Over"):
         st.session_state.session_id = None
-        st.session_state.files_ready_for_chat = False # Reset chat readiness too
+        st.session_state.files_ready_for_chat = False
         st.session_state.messages = []
         st.session_state.uploaded_file_names = []
-        # Use rerun to clear widgets and state cleanly
+        st.session_state.upload_status_message = ""
+        st.session_state.upload_status_type = "info"
         st.rerun()
 
     st.markdown("---")
@@ -159,152 +190,89 @@ with st.sidebar:
 
 
 # --- Chat Interface ---
-
 # Display chat messages from history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        # Display content based on type
         if message["type"] in ["text", "not_found", "error"]:
             st.markdown(message["content"])
         elif message["type"] == "data_table":
-            st.markdown(message["content"]) # Display the introductory text
-            if message.get("data") and isinstance(message["data"], dict) and "rows" in message["data"] and "columns" in message["data"]:
-                try:
-                    df = pd.DataFrame(message["data"]["rows"], columns=message["data"]["columns"])
-                    st.dataframe(df, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Failed to display table: {e}")
-                    st.json(message.get("data", "No data found in message")) # Show raw data on error
-            else:
-                st.error("Received table data in unexpected format.")
-                st.json(message.get("data", "No data found in message"))
+             st.markdown(message["content"])
+             if message.get("data") and isinstance(message["data"], dict) and "rows" in message["data"] and "columns" in message["data"]:
+                 try: df = pd.DataFrame(message["data"]["rows"], columns=message["data"]["columns"]); st.dataframe(df, use_container_width=True)
+                 except Exception as e: st.error(f"Table display error: {e}"); st.json(message.get("data"))
+             else: st.error("Bad table data format"); st.json(message.get("data"))
         elif message["type"] == "data_chart":
-            st.markdown(message["content"]) # Display introductory text
-            if message.get("data") and isinstance(message["data"], dict):
-                try:
-                    fig = go.Figure(message["data"])
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Failed to display chart: {e}")
-                    st.json(message.get("data", "No data found in message")) # Show raw data on error
-            else:
-                st.error("Received chart data in unexpected format.")
-                st.json(message.get("data", "No data found in message"))
+             st.markdown(message["content"])
+             if message.get("data") and isinstance(message["data"], dict):
+                 try: fig = go.Figure(message["data"]); st.plotly_chart(fig, use_container_width=True)
+                 except Exception as e: st.error(f"Chart display error: {e}"); st.json(message.get("data"))
+             else: st.error("Bad chart data format"); st.json(message.get("data"))
 
-        # Display sources if available (applies to assistant messages)
-        if message["role"] == "assistant" and message.get("sources"):
-            display_sources(message["sources"])
+        if message["role"] == "assistant" and message.get("sources"): display_sources(message["sources"])
 
-
-# Chat input for user query - enabled only if files_ready_for_chat is True
+# Chat input for user query
 prompt = st.chat_input("Ask a question about the documents...", disabled=not st.session_state.files_ready_for_chat)
 
 if prompt:
     cleaned_prompt = prompt.strip()
-    if not cleaned_prompt:
-        st.warning("Please enter a question.")
-    elif not st.session_state.session_id:
-        # This check might be redundant if disabled state works, but good failsafe
-        st.error("Please upload and process documents first (Session ID missing).")
+    if not cleaned_prompt: st.warning("Please enter a question.")
+    elif not st.session_state.session_id: st.error("Session ID missing. Please upload documents again.")
     else:
-        # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": cleaned_prompt, "type": "text"})
-        # Display user message in chat message container
-        with st.chat_message("user"):
-            st.markdown(cleaned_prompt)
+        with st.chat_message("user"): st.markdown(cleaned_prompt)
 
-        # Display assistant response in chat message container
         with st.chat_message("assistant"):
-            message_placeholder = st.empty() # Placeholder for streaming or final answer
-            full_response_content = ""
-            sources = []
-            response_type = "text" # Default type
-            response_data = None # For table/chart data
+            message_placeholder = st.empty(); message_placeholder.markdown("▌")
+            full_response_content = ""; sources = []; response_type = "error"; response_data = None
 
-            with st.spinner("Thinking... Contacting AI and searching documents..."):
+            with st.spinner("Thinking..."):
                 try:
                     payload = {"question": cleaned_prompt, "session_id": st.session_state.session_id}
-                    response = requests.post(ASK_ENDPOINT, json=payload, timeout=120) # Timeout for LLM response
+                    print(f"Frontend: Sending POST to {ASK_ENDPOINT} with payload: {payload}")
+                    response = requests.post(ASK_ENDPOINT, json=payload, timeout=180)
+                    print(f"Frontend: Received ask response status: {response.status_code}")
                     response.raise_for_status()
 
                     result = response.json()
+                    print(f"Frontend: Raw backend response for /ask:")
 
-                    # --- Process Backend Response ---
-                    # Explicitly check for backend signaling an error in its JSON response
-                    if result.get("status") == "error" or result.get("type") == "error":
-                        full_response_content = f"❌ Error from backend: {result.get('message') or result.get('answer', 'Unknown backend error')}"
-                        response_type = "error"
-                        message_placeholder.markdown(full_response_content) # Display error directly
+                    full_response_content = result.get("answer", "Error: No answer field in response.")
+                    response_type = result.get("type", "error")
+                    sources = result.get("sources", [])
+                    response_data = result.get("data") or result.get("chart_data")
+
+                    message_placeholder.empty() # Clear thinking indicator
+
+                    if response_type in ["text", "not_found", "error"]: st.markdown(full_response_content)
+                    elif response_type == "data_table":
+                        st.markdown(full_response_content)
+                        if response_data and isinstance(response_data, dict) and "rows" in response_data and "columns" in response_data:
+                            try: df = pd.DataFrame(response_data["rows"], columns=response_data["columns"]); st.dataframe(df, use_container_width=True)
+                            except Exception as e: st.error(f"Table display error: {e}"); st.json(response_data or "Missing data field")
+                        else: st.error("Bad table data format"); st.json(response_data or "Missing data field")
+                    elif response_type == "data_chart":
+                        st.markdown(full_response_content)
+                        if response_data and isinstance(response_data, dict):
+                            try: fig = go.Figure(response_data); st.plotly_chart(fig, use_container_width=True)
+                            except Exception as e: st.error(f"Chart display error: {e}"); st.json(response_data or "Missing data field")
+                        else: st.error("Bad chart data format"); st.json(response_data or "Missing data field")
                     else:
-                        full_response_content = result.get("answer", "No answer provided.")
-                        response_type = result.get("type", "text") # Get type from backend
-                        sources = result.get("sources", [])
-                        # Get table or chart data specifically
-                        if response_type == "data_table":
-                            response_data = result.get("data")
-                        elif response_type == "data_chart":
-                             response_data = result.get("chart_data")
-                        else:
-                             response_data = None # Ensure it's None for text/error/not_found
+                         st.error(f"Received unknown response type from backend: {response_type}"); st.json(result)
+                         response_type = "error"
 
-                        # Display based on type
-                        message_placeholder.markdown(full_response_content + "▌") # Initial text placeholder
-
-                        if response_type == "data_table" and response_data:
-                             if isinstance(response_data, dict) and "rows" in response_data and "columns" in response_data:
-                                try:
-                                    df = pd.DataFrame(response_data["rows"], columns=response_data["columns"])
-                                    st.dataframe(df, use_container_width=True)
-                                except Exception as e:
-                                    st.error(f"Failed to display table: {e}")
-                                    st.json(response_data)
-                             else:
-                                st.error("Received table data in unexpected format.")
-                                st.json(response_data)
-                        elif response_type == "data_chart" and response_data:
-                             if isinstance(response_data, dict):
-                                try:
-                                    fig = go.Figure(response_data)
-                                    st.plotly_chart(fig, use_container_width=True)
-                                except Exception as e:
-                                    st.error(f"Failed to display chart: {e}")
-                                    st.json(response_data)
-                             else:
-                                st.error("Received chart data in unexpected format.")
-                                st.json(response_data)
-
-                        # Update placeholder with final text if not handled by data display
-                        if response_type not in ["data_table", "data_chart"]:
-                            message_placeholder.markdown(full_response_content)
-
-                        # Display sources at the end for non-error messages
-                        if response_type != "error":
-                            display_sources(sources)
+                    if response_type != "error": display_sources(sources)
 
                 except requests.exceptions.Timeout:
-                    full_response_content = "❌ Error: The request timed out while waiting for the backend response."
-                    response_type = "error"
-                    message_placeholder.markdown(full_response_content)
+                    message_placeholder.error("❌ Error: Backend timed out answering."); response_type = "error"; full_response_content = "Timeout"
                 except requests.exceptions.ConnectionError:
-                    full_response_content = f"❌ Connection Error: Could not connect to the backend at {BACKEND_URL}."
-                    response_type = "error"
-                    message_placeholder.markdown(full_response_content)
+                    message_placeholder.error(f"❌ Connection Error to backend."); response_type = "error"; full_response_content = "Connection Error"
                 except requests.exceptions.RequestException as e:
-                    full_response_content = f"❌ An error occurred while asking the question: {e}"
-                    response_type = "error"
-                    try:
-                         # Attempt to get more details from the response if available
-                         error_details = response.json().get("message", response.text) # Or "detail"
-                         full_response_content += f"\nBackend error details: {error_details}"
-                    except Exception: # Catch JSONDecodeError or AttributeError
-                        full_response_content += f"\nCould not retrieve specific error details. Status code: {response.status_code if 'response' in locals() else 'N/A'}"
-                    message_placeholder.markdown(full_response_content)
+                    error_msg = f"❌ Error asking question: {e}"
+                    try: error_details = response.json().get("message", response.text); error_msg += f"\nBackend: {error_details}"
+                    except Exception: error_msg += f"\nStatus code: {response.status_code if 'response' in locals() else 'N/A'}"
+                    message_placeholder.error(error_msg); response_type = "error"; full_response_content = error_msg
 
-            # Add assistant response to chat history AFTER potentially displaying data widgets
             st.session_state.messages.append({
-                "role": "assistant",
-                "content": full_response_content, # Store the main text part
-                "type": response_type,
-                "data": response_data, # Store the raw data (table/chart)
-                "sources": sources
+                "role": "assistant", "content": full_response_content, "type": response_type,
+                "data": response_data, "sources": sources if response_type != "error" else []
             })

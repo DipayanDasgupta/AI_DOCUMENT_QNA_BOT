@@ -1,21 +1,42 @@
-from openai import OpenAI, AsyncOpenAI, APIError, RateLimitError
-from typing import List, Dict, Any
+import google.generativeai as genai
+from typing import List, Dict, Any, Optional
 import json
+import asyncio
+import os
+import traceback # Import traceback for logging
 
 from app.core.config import settings
 from app.models.data_models import DocumentChunk
-from typing import List
 
-# Initialize OpenAI Client
-# Ensure OPENAI_API_KEY is loaded in settings via .env
-if not settings.OPENAI_API_KEY:
-    print("WARNING: OpenAI API Key not configured. LLM calls will fail.")
-    # Optionally initialize client anyway, calls will raise error later
-    # Or raise configuration error here
-    async_client = None # Set to None if key is missing
-else:
-     async_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+# --- Globals ---
+gemini_model = None
+gemini_client_configured = False
 
+def configure_gemini_client():
+    """Initializes the Gemini client if not already done."""
+    global gemini_model, gemini_client_configured
+    if gemini_client_configured:
+        return
+
+    print("[LLM Service] Attempting to configure Gemini client...")
+    if not settings.GEMINI_API_KEY:
+        print("WARNING: Gemini API Key not configured.")
+        gemini_model = None
+        gemini_client_configured = True # Mark as configured (but failed)
+        return
+
+    try:
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        print(f"[LLM Service] Gemini client configured for model: {settings.GEMINI_MODEL_NAME}")
+        gemini_client_configured = True
+    except Exception as e:
+        print(f"ERROR: Failed to configure Gemini client: {e}")
+        gemini_model = None
+        gemini_client_configured = True # Mark as configured (but failed)
+
+# Call configuration once on import
+configure_gemini_client()
 
 def format_context(context_chunks: List[DocumentChunk]) -> str:
     """Formats the retrieved chunks into a single string for the LLM prompt."""
@@ -33,90 +54,149 @@ def format_context(context_chunks: List[DocumentChunk]) -> str:
 
     return formatted_context.strip()
 
-
 async def generate_answer(question: str, context_chunks: List[DocumentChunk]) -> Dict[str, Any]:
     """
-    Generates an answer using an LLM based on the provided question and context.
-
-    Args:
-        question: The user's question.
-        context_chunks: A list of relevant DocumentChunk objects from retrieval.
-
-    Returns:
-        A dictionary containing the answer, type, and potentially structured data.
-        Example: {"answer": "...", "type": "text", "data": None, "chart_data": None}
+    Generates an answer using Google Gemini based on the provided question and context.
     """
-    if not async_client:
+    if not gemini_client_configured:
+         configure_gemini_client() # Try again in case key was added later
+
+    if not gemini_model:
+         print("[LLM Service] Aborting generation: Gemini model not available.")
          return {
-            "answer": "LLM functionality is disabled because the OpenAI API key is not configured.",
-            "type": "error",
-            "data": None,
-            "chart_data": None
+            "answer": "LLM functionality is disabled or failed to initialize. Check API key configuration and backend logs.",
+            "type": "error", "data": None, "chart_data": None
         }
 
     formatted_context = format_context(context_chunks)
 
-    system_prompt = """You are an AI assistant answering questions based *only* on the provided context.
-If the answer is not found in the context, state that the information is not available in the provided documents.
-Do not make up information or use external knowledge.
-Be concise and directly answer the question.
-If the context contains structured data (like from a table or list) relevant to the question, present the answer clearly. If the question asks for a calculation (like total or average) based on data in the context, perform the calculation and state the result.
-Format your final answer clearly.
-"""
+    # Simplified System Prompt (integrated into main prompt for Gemini)
+    prompt = f"""Based *only* on the following context:
 
-    user_prompt = f"""Based on the following context:
-
+**Context:**
 {formatted_context}
 
 ---
-Answer the question: {question}"""
+**Question:** {question}
 
-    print(f"[LLM Service] Calling OpenAI API (Model: {settings.OPENAI_MODEL_NAME})...")
-    # print(f"[LLM Service] User Prompt Context Snippet:\n{user_prompt[:500]}...") # Debug: Log snippet
+**Instructions:**
+- Answer the question using *only* information found in the Context above.
+- If the question asks for a summary or asks "what is this about?", synthesize a summary from the key points in the Context.
+- If the context does not contain the answer, state clearly: "The provided documents do not contain information relevant to this question."
+- Be as detailed as the context allows.
+
+ - **IMPORTANT:** Do NOT include any meta-references like "(Context Chunk X)" in your final answer.
+**Answer:**
+""" # Ensure the closing triple quote is here and correctly placed
+
+    print(f"[LLM Service] Calling Gemini API (Model: {settings.GEMINI_MODEL_NAME})...")
+    # --- Debug Logging ---
+    print(f"[LLM Service] Context Provided (First 1000 chars):\n{formatted_context[:1000]}...")
+    print("-" * 20 + " END CONTEXT SNIPPET " + "-" * 20)
+    # Log the prompt *without* the potentially huge context for clarity
+    prompt_structure_log = f"""**Instructions:**
+- Answer the question using *only* information found in the Context above.
+- If the question asks for a summary or asks "what is this about?", synthesize a summary from the key points in the Context.
+- If the context does not contain the answer, state clearly: "The provided documents do not contain information relevant to this question."
+- Be as detailed as the context allows.
+
+---
+**Question:** {question}
+
+**Answer:**
+"""
+    print(f"[LLM Service] Prompt Structure Sent (Context omitted):\n{prompt_structure_log}")
+    # --- End Debug Logging ---
+
+
+    # Configuration for generation
+    generation_config = genai.types.GenerationConfig(
+      temperature=0.6, # Slightly increased temperature
+      max_output_tokens=1500 # Increased token limit
+    )
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    ]
 
     try:
-        response = await async_client.chat.completions.create(
-            model=settings.OPENAI_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2, # Lower temperature for more factual answers
-            max_tokens=500, # Adjust as needed
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: gemini_model.generate_content(
+                prompt, # Pass the full prompt with context
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
         )
 
-        llm_answer = response.choices[0].message.content.strip()
-        print("[LLM Service] Received response from OpenAI.")
+        # --- Process Gemini Response ---
+        raw_response_text = "[No response text accessible]" # Default
+        gemini_answer = "" # Default empty answer
+        answer_type = "error" # Default to error
 
-        # Basic check if LLM couldn't find the answer
-        answer_lower = llm_answer.lower()
-        if "not available in the provided document" in answer_lower or \
-           "not found in the context" in answer_lower or \
-           "information is not available" in answer_lower:
-            answer_type = "not_found"
-        else:
-            # [TODO: Dhaksesh/Advanced] Add logic here to detect if the answer
-            # represents table data or chart data based on LLM output or context analysis.
-            # For now, assume text.
-            answer_type = "text"
+        try:
+            # Log raw response text if possible
+            raw_response_text = response.text
+            print(f"[LLM Service] Raw response content from Gemini: {raw_response_text!r}") # Use !r
+
+            # Check for safety blocks using prompt_feedback first
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 block_reason = response.prompt_feedback.block_reason
+                 error_msg = f"Content generation blocked by safety filters. Reason: {block_reason}."
+                 print(f"[LLM Service] WARNING: {error_msg}")
+                 return {"answer": "Could not generate an answer due to content safety filters.", "type": "error"}
+
+            # Check candidates for content
+            if response.candidates and hasattr(response.candidates[0], 'content') and hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
+                 gemini_answer = response.text.strip() # Get text if candidate is valid
+                 print("[LLM Service] Received valid response content from Gemini.")
+
+                 # Determine type based on content
+                 answer_lower = gemini_answer.lower()
+                 if "the provided documents do not contain information relevant to this question" in answer_lower:
+                     answer_type = "not_found"
+                 else:
+                     # [TODO] Add logic to detect table/chart data if needed
+                     answer_type = "text" # Assume text otherwise
+
+            else: # No valid candidate content
+                finish_reason = "Unknown"
+                if hasattr(response, 'candidates') and response.candidates and hasattr(response.candidates[0], 'finish_reason'):
+                    finish_reason = response.candidates[0].finish_reason
+                error_msg = f"No valid content candidate found in response. Finish Reason: {finish_reason}"
+                print(f"[LLM Service] WARNING: {error_msg}")
+                if "SAFETY" in str(finish_reason).upper():
+                    return {"answer": "Could not generate an answer due to content safety filters.", "type": "error"}
+                else:
+                    return {"answer": f"LLM did not generate a valid answer. (Reason: {finish_reason})", "type": "error"}
+
+        except ValueError:
+            # Handle cases where accessing response.text might raise ValueError (e.g., blocked content)
+             print("[LLM Service] ValueError accessing response text, likely blocked content.")
+             # Check prompt feedback again just in case
+             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                  return {"answer": "Could not generate an answer due to content safety filters.", "type": "error"}
+             else:
+                  return {"answer": "LLM response was blocked or empty.", "type": "error"}
+        except AttributeError as ae:
+             print(f"[LLM Service] AttributeError accessing response parts: {ae}")
+             return {"answer": "Error processing LLM response format.", "type": "error"}
 
 
+        # Return successful result
         return {
-            "answer": llm_answer,
+            "answer": gemini_answer,
             "type": answer_type,
-            "data": None, # [TODO] Populate if type is data_table
-            "chart_data": None # [TODO] Populate if type is data_chart
+            "data": None,
+            "chart_data": None
         }
 
-    except RateLimitError as e:
-        print(f"[LLM Service] ERROR: OpenAI Rate Limit Exceeded: {e}")
-        return {"answer": "Error: The system is currently experiencing high load. Please try again later.", "type": "error"}
-    except APIError as e:
-        print(f"[LLM Service] ERROR: OpenAI API Error: {e}")
-        return {"answer": f"Error: Could not get answer from LLM. API Error: {e.code}", "type": "error"}
     except Exception as e:
-        print(f"[LLM Service] ERROR: An unexpected error occurred during LLM call: {e}")
-        # import traceback
-        # traceback.print_exc() # Log full traceback for debugging
-        return {"answer": "Error: An unexpected error occurred while generating the answer.", "type": "error"}
+        # Catch other errors during the API call or processing
+        print(f"[LLM Service] ERROR: An unexpected error occurred during Gemini API call/processing: {e}")
+        traceback.print_exc()
+        return {"answer": "Error: An unexpected error occurred while communicating with the LLM.", "type": "error"}
 
