@@ -136,3 +136,4 @@ Thumbs.db
 # --- Misc ---
 *.ipynb_checkpoints
 # Add any other specific files/dirs to ignore
+*.json # Exclude the chunk data maps too
