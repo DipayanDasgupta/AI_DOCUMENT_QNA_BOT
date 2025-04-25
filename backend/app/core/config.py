@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
     CHUNK_SIZE: int = 500
     CHUNK_OVERLAP: int = 50
-    SEARCH_TOP_K: int = 10 # Increased context
+    SEARCH_TOP_K: int = 15 # Increased context
 
     # --- OCR Settings ---
     TESSERACT_CMD: Optional[str] = None
