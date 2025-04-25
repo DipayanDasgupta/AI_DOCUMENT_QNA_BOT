@@ -131,3 +131,8 @@ Thumbs.db
 # --- Build / Distribution Artifacts ---
 # --- Logs ---
 # --- Test / Coverage ---
+# --- Data / Index / Uploads ---
+# Important: Keep data out of repo if large or sensitive
+# --- Misc ---
+*.ipynb_checkpoints
+# Add any other specific files/dirs to ignore

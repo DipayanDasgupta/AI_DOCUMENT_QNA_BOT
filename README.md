@@ -1,186 +1,182 @@
 # AI Document Q&A System (Mando Hackathon)
 
-This project implements an AI-powered question-answering system capable of ingesting documents in various formats, building a knowledge base, and answering user questions based on the content.
+This project implements an AI-powered, general-purpose question-answering (Q&A) system capable of ingesting documents in various formats, crawling linked web pages, performing web searches, building a knowledge base, and accurately answering user questions based on the combined information.
 
-## Features
+## Features Implemented
 
-*   **Multi-Format Ingestion:** Supports PDF, DOCX, TXT, PNG, JPG documents. (Support for PPTX, XLSX, CSV, JSON can be added).
-*   **OCR Integration:** Extracts text from images (PNG, JPG) and image-based PDFs using Tesseract OCR.
-*   **Web Crawling:** Extracts URLs mentioned in documents and crawls the linked web pages (depth 0) to include their text content.
-*   **Semantic Search:** Uses Sentence Transformers (`all-MiniLM-L6-v2`) to generate embeddings and FAISS for efficient similarity search to find relevant context even if keywords don't match exactly.
-*   **LLM Integration:** Uses OpenAI (GPT-3.5 Turbo by default) to generate natural language answers based on the retrieved context.
-*   **Web Interface:** A Streamlit application provides a user-friendly interface for file uploads and asking questions.
-*   **Background Processing:** File parsing, crawling, and indexing happen in background tasks for a more responsive UI.
+*   **Multi-Format Ingestion:** Supports PDF (text & image-based via OCR), DOCX, PPTX, TXT, PNG/JPG (via OCR), CSV, XLSX, JSON (basic processing via Pandas summary).
+*   **OCR Integration:** Uses Tesseract OCR with OpenCV preprocessing and pdf2image fallback for extracting text from images and scanned PDFs.
+*   **Reference Link Crawling:** Extracts URLs from documents and uses Trafilatura to fetch and parse the main content from linked web pages (depth 0).
+*   **Web Search Integration (RAG):** Performs live web searches using the Tavily Search API based on the user's question to supplement document/crawled context.
+*   **Semantic Search:** Uses Sentence Transformers () and FAISS (local index) for efficient retrieval of relevant text chunks (from documents and crawled pages).
+*   **LLM Integration:** Uses Google Gemini (configurable model) to generate answers based on a combined context from documents, crawled pages, and web search results. Prompting emphasizes grounding answers in provided sources.
+*   **Structured Data Handling:** Loads CSV/XLSX/JSON using Pandas, generates a textual summary (schema, head), indexes the summary, and instructs the LLM to interpret it.
+*   **Async Backend:** Uses FastAPI with background tasks for non-blocking file processing (parsing, crawling, indexing).
+*   **Status Polling Frontend:** Streamlit UI polls a backend status endpoint to provide feedback during processing and enables chat only when indexing is complete.
+*   **User Interface:** Simple, clean Streamlit interface for file uploads, status viewing, and Q&A interaction.
 
 ## Project Structure
-Use code with caution.
-Markdown
+
+```
 mando_hackathon/
 ├── backend/
-│ ├── app/
-│ │ ├── api/ # FastAPI endpoints (upload, query)
-│ │ ├── core/ # Configuration (settings)
-│ │ ├── models/ # Pydantic models (API requests/responses, internal data)
-│ │ ├── services/ # Business logic
-│ │ │ ├── knowledge/ # Indexing, search, crawling, LLM interface
-│ │ │ ├── parser/ # Document parsing, OCR
-│ │ │ └── text_splitter.py # Text chunking logic
-│ │ └── init.py
-│ ├── main.py # FastAPI application entry point
-│ └── requirements.txt # Backend Python dependencies
-├── data/
-│ ├── index_store/ # Stores FAISS index files and mappings (per session)
-│ └── uploaded_files/ # Temporary storage for uploaded files during processing
+│   ├── app/
+│   │   ├── api/              # FastAPI routers (upload, query, status)
+│   │   ├── core/             # Configuration (settings, state)
+│   │   ├── models/           # Pydantic models
+│   │   ├── services/         # Business logic modules
+│   │   │   ├── knowledge/    # Indexing, search, crawling, LLM, web search
+│   │   │   ├── parser/       # Document parsing, OCR
+│   │   │   └── text_splitter.py
+│   │   └── __init__.py
+│   ├── main.py             # FastAPI application entry point
+│   └── requirements.txt    # Backend dependencies
+├── data/                   # (Ignored by Git)
+│   ├── index_store/        # Stores FAISS index files + mappings
+│   └── uploaded_files/     # Temporary storage for uploads
 ├── frontend/
-│ ├── app.py # Streamlit application code
-│ └── requirements.txt # Frontend Python dependencies
-├── .env # Stores API keys (e.g., OpenAI) - !!! DO NOT COMMIT !!!
-├── .gitignore # Files and directories ignored by Git
-├── venv/ # Python virtual environment (created by user)
-└── README.md # This file
+│   ├── app.py              # Streamlit application code
+│   └── requirements.txt    # Frontend dependencies
+├── .env                    # API keys (Gemini, Tavily) - !!! DO NOT COMMIT !!!
+├── .gitignore
+├── venv/                   # (Created by user)
+└── README.md               # This file
+```
+
 ## Setup Instructions
 
 ### 1. Prerequisites
 
-*   **Python:** Version 3.10+ recommended.
-*   **Git:** For cloning the repository.
-*   **Tesseract OCR Engine:** Required for extracting text from images.
+*   **Python:** 3.10+ recommended.
+*   **Git:** For cloning.
+*   **System Libraries:**
+    *   **Tesseract OCR Engine:** (, ) - For image/PDF OCR.
+    *   **Poppler Utilities:** () - Required by  for PDF OCR fallback.
 
 ### 2. Clone Repository
 
 ```bash
-git clone <your-repo-url>
-cd mando_hackathon
-Use code with caution.
-3. Create Python Virtual Environment
+git clone https://github.com/DipayanDasgupta/AI_DOCUMENT_QNA_BOT.git
+cd AI_DOCUMENT_QNA_BOT
+```
+
+### 3. Create Virtual Environment
+
+```bash
 python3 -m venv venv
-source venv/bin/activate # On Windows use `venv\Scripts\activate`
-Use code with caution.
-Bash
-4. Install Python Dependencies
-Install requirements for both the backend and the frontend:
-# Install backend dependencies
+source venv/bin/activate # On Windows: venv\Scripts\activate
+```
+
+### 4. Install System Dependencies
+
+Ensure Tesseract and Poppler are installed on your system.
+
+*   **Debian/Ubuntu:**
+    ```bash
+    sudo apt update && sudo apt install -y tesseract-ocr tesseract-ocr-eng poppler-utils
+    ```
+*   **macOS (Homebrew):**
+    ```bash
+    brew install tesseract poppler
+    # Optional: brew install tesseract-lang
+    ```
+*   **Windows:** Download installers/binaries for Tesseract (UB-Mannheim recommended) and Poppler. Add their respective  directories to your system's PATH environment variable.
+
+Verify installations: tesseract 5.3.4
+ leptonica-1.82.0
+  libgif 5.2.1 : libjpeg 8d (libjpeg-turbo 2.1.5) : libpng 1.6.43 : libtiff 4.5.1 : zlib 1.3 : libwebp 1.3.2 : libopenjp2 2.5.0
+ Found AVX2
+ Found AVX
+ Found FMA
+ Found SSE4.1
+ Found OpenMP 201511
+ Found libarchive 3.7.2 zlib/1.3 liblzma/5.4.5 bz2lib/1.0.8 liblz4/1.9.4 libzstd/1.5.5
+ Found libcurl/8.5.0 OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libidn2/2.3.7 libpsl/0.21.2 (+libidn2/2.3.7) libssh/0.10.6/openssl/zlib nghttp2/1.59.0 librtmp/2.3 OpenLDAP/2.6.7 and  (or similar poppler command).
+
+### 5. Install Python Dependencies
+
+```bash
+# Install backend and frontend dependencies
+pip install -U pip # Upgrade pip
 pip install -r backend/requirements.txt
-
-# Install frontend dependencies
 pip install -r frontend/requirements.txt
-Use code with caution.
-Bash
-5. Install System Dependencies (Tesseract)
-Ensure the Tesseract OCR engine is installed and accessible in your system's PATH.
-Debian/Ubuntu:
-sudo apt update && sudo apt install tesseract-ocr
-# Optional: sudo apt install tesseract-ocr-eng # For English language pack
-Use code with caution.
-Bash
-macOS (using Homebrew):
-brew install tesseract
-# Optional: brew install tesseract-lang
-Use code with caution.
-Bash
-Windows: Download an installer (e.g., from UB-Mannheim Tesseract builds on GitHub) and ensure the installation directory is added to your system's PATH.
-Verify the installation by running tesseract --version in your terminal.
-6. Configure API Key
-Create a file named .env in the project root directory (mando_hackathon/.env).
-Add your OpenAI API key to this file:
-OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-Use code with caution.
-Env
-Replace "sk-..." with your actual key.
-Important: The .gitignore file is configured to prevent committing the .env file. Keep your API keys secure.
-Running the Application
-You need two terminals open, both with the virtual environment activated (source venv/bin/activate).
-Terminal 1: Start the Backend Server
-Navigate to the project root directory:
-cd /path/to/mando_hackathon
-Use code with caution.
-Bash
-Activate the virtual environment:
-source venv/bin/activate
-Use code with caution.
-Bash
-Set the PYTHONPATH environment variable:
-export PROJECT_ROOT_PATH="$(pwd)"
-export BACKEND_PATH="${PROJECT_ROOT_PATH}/backend"
-export PYTHONPATH="${PROJECT_ROOT_PATH}:${BACKEND_PATH}:${PYTHONPATH:-}"
-Use code with caution.
-Bash
-Run the Uvicorn server:
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --log-level info
-Use code with caution.
-Bash
-Keep this terminal running. You should see logs indicating the server has started and loaded the embedding model.
-Terminal 2: Start the Frontend Application
-Navigate to the project root directory:
-cd /path/to/mando_hackathon
-Use code with caution.
-Bash
-Activate the virtual environment:
-source venv/bin/activate
-Use code with caution.
-Bash
-Navigate to the frontend directory:
+# Download NLTK data needed for text splitting
+python -c "import nltk; nltk.download('punkt', quiet=True)"
+```
+
+### 6. Configure API Keys
+
+*   Create a file named `.env` in the project root directory (`AI_DOCUMENT_QNA_BOT/.env`).
+*   Add your API keys:
+    ```env
+    # Get from Google AI Studio: https://aistudio.google.com/
+    GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"
+
+    # Get from Tavily: https://tavily.com/
+    TAVILY_API_KEY="YOUR_TAVILY_API_KEY_HERE"
+    ```
+*   Replace placeholders with your actual keys.
+*   The `.gitignore` prevents this file from being committed.
+
+## Running the Application
+
+**Important:** Run the backend server **WITHOUT** the `--reload` flag when testing functionality that involves background tasks saving index files, otherwise the server might restart unexpectedly. Use `--reload` only for rapid code changes that don't involve the indexing pipeline.
+
+You need **two separate terminals**, both navigated to the project root (`/AI_DOCUMENT_QNA_BOT`) and with the virtual environment activated (`source venv/bin/activate`).
+
+**Terminal 1: Start Backend Server**
+
+```bash
+# Navigate into the backend directory
+cd backend
+
+# Run Uvicorn (NO reload for stable background tasks)
+uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
+```
+Wait for logs indicating "Uvicorn running on http://0.0.0.0:8000".
+
+**Terminal 2: Start Frontend Application**
+
+```bash
+# Navigate into the frontend directory
 cd frontend
-Use code with caution.
-Bash
-Run the Streamlit application:
+
+# Run Streamlit
 streamlit run app.py
-Use code with caution.
-Bash
-Keep this terminal running.
-Accessing the Application
-Open your web browser and navigate to the URL provided by Streamlit (usually http://localhost:8501).
-Usage
-Use the sidebar in the web interface to upload one or more supported documents (PDF, DOCX, TXT, PNG, JPG).
-Wait for the file processing to complete in the background. Monitor the backend terminal logs for progress (parsing, crawling, indexing). The frontend might show a loading indicator or an initial status message.
-Once processing seems complete, type your question about the document content into the chat input box at the bottom and press Enter.
-The backend will perform a semantic search, retrieve relevant context, and use the OpenAI LLM to generate an answer based only on that context.
-The answer will be displayed in the chat interface.
-Technologies Used
-Backend: FastAPI, Uvicorn, Pydantic
-Frontend: Streamlit
-LLM: OpenAI API (GPT-3.5 Turbo default)
-Embeddings: Sentence Transformers (all-MiniLM-L6-v2)
-Vector Store: FAISS (CPU)
-Parsing: PyPDF, python-docx
-OCR: Pytesseract (+ Tesseract engine)
-Crawling: Requests, BeautifulSoup4
-Text Processing: NLTK
-Limitations
-Persistence: Indexed data (FAISS files, mappings, chunk details) is currently stored locally in the data/ directory but the in-memory CHUNK_DETAIL_STORE is lost when the backend server restarts. A proper database would be needed for persistence.
-Scalability: The current setup uses local FAISS and in-memory storage, suitable for moderate use but not large-scale deployment.
-Parser Coverage: Only basic parsers for PDF, DOCX, TXT, and Images (OCR) are implemented. Adding robust support for XLSX, PPTX, CSV, JSON requires specific parsing logic.
-OCR Accuracy: Tesseract's accuracy depends on image quality and language.
-Crawling: Basic depth-0 crawling. More advanced crawling (handling JS, respecting robots.txt) is not implemented.
-Error Handling: Basic error handling is present, but could be more robust.
-**2. Steps to Restart Backend and Frontend**
+```
 
-Here are the clear steps if you need to stop and restart everything:
+### Accessing the Application
 
-**To Restart the Backend:**
+Open your web browser and navigate to the URL provided by Streamlit (usually `http://localhost:8501`).
 
-1.  Go to the terminal window where the `uvicorn backend.main:app ...` command is running.
-2.  Press `Ctrl+C` to stop the server. Wait for it to shut down cleanly (you should see shutdown logs).
-3.  Make sure you are still in the **project root directory** (`~/mando_hackathon`).
-4.  Make sure the virtual environment is still active (`source venv/bin/activate` if needed).
-5.  **Re-export the `PYTHONPATH`** (environment variables are often specific to a shell session):
-    ```bash
-    export PROJECT_ROOT_PATH="$(pwd)"
-    export BACKEND_PATH="${PROJECT_ROOT_PATH}/backend"
-    export PYTHONPATH="${PROJECT_ROOT_PATH}:${BACKEND_PATH}:${PYTHONPATH:-}"
-    ```
-6.  Run the `uvicorn` command again:
-    ```bash
-    uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --log-level info
-    ```
+## Usage
 
-**To Restart the Frontend:**
+1.  Use the sidebar to upload documents (supports multiple formats).
+2.  Wait for the status message in the sidebar to change from "Processing..." (⏳) to "Completed..." (✅). This indicates parsing, crawling (if applicable), and indexing are finished.
+3.  The chat input below will become enabled.
+4.  Type your question about the content of the uploaded documents or crawled web pages.
+5.  The system will retrieve relevant context (from documents and web search via Tavily), generate an answer using Gemini, and display it along with the sources used.
 
-1.  Go to the terminal window where the `streamlit run app.py` command is running.
-2.  Press `Ctrl+C` to stop the Streamlit app.
-3.  Make sure you are in the **frontend directory** (`~/mando_hackathon/frontend`).
-4.  Make sure the virtual environment is still active (`source ../venv/bin/activate` or `source ~/mando_hackathon/venv/bin/activate` if needed).
-5.  Run the `streamlit` command again:
-    ```bash
-    streamlit run app.py
-    ```
+## Technologies Used
+
+*   **Backend:** FastAPI, Uvicorn
+*   **Frontend:** Streamlit
+*   **LLM:** Google Gemini API
+*   **Web Search RAG:** Tavily Search API
+*   **Embeddings:** Sentence Transformers
+*   **Vector Store:** FAISS (CPU)
+*   **Parsing:** PyPDF, python-docx, python-pptx, Pandas
+*   **OCR:** Tesseract, OpenCV, pdf2image, Pytesseract
+*   **Crawling:** Trafilatura
+*   **Text Processing:** NLTK
+*   **Core Python Libraries:** asyncio, os, json, etc.
+
+## Limitations & Potential Improvements
+
+*   **State Persistence:** In-memory stores (status, dataframes, chunk details) are lost on backend restart. Implement database storage (e.g., SQLite, PostgreSQL with pgvector, Redis) for persistence.
+*   **Scalability:** Local FAISS and processing are suitable for moderate use. For large scale, consider distributed task queues (Celery), cloud-based vector databases (Pinecone, Weaviate), and scalable hosting.
+*   **Structured Data Querying:** Relies on LLM interpreting text summaries. Implementing direct Pandas/SQL querying based on question intent would be more powerful but complex.
+*   **OCR Accuracy:** Tesseract struggles with complex layouts/handwriting. Cloud Vision APIs offer better accuracy for such cases.
+*   **Crawler Robustness:** Basic Trafilatura usage. Could add more sophisticated error handling, respect for robots.txt, JavaScript rendering support (e.g., using Playwright/Selenium).
+*   **UI/UX:** Frontend is functional but basic. Could add features like citation highlighting, conversation history management, user feedback.
+*   **Security:** Basic setup. Production deployment needs proper security considerations (input validation, rate limiting, authentication if needed).

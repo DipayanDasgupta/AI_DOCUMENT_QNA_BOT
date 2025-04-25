@@ -1,15 +1,19 @@
 import os
 import uuid
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+import io # For pandas reading in-memory
+import json
 
 # Parsing Libraries
 from pypdf import PdfReader
 import docx
+from pptx import Presentation # For PPTX
+import pandas as pd # For CSV, XLSX, JSON
 
 # OCR & Image Handling
 from PIL import Image
-from pdf2image import convert_from_path # Import pdf2image
-from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError, PDFSyntaxError
+from pdf2image import convert_from_path
+from pdf2image.exceptions import PDFInfoNotInstalledError
 
 # Local Imports
 from app.models.data_models import DocumentChunk
@@ -17,206 +21,192 @@ from app.services.parser.ocr import perform_ocr
 from app.services.text_splitter import chunk_text, extract_urls
 from app.core.config import settings
 
+# --- PDF Parsing ---
 async def _parse_pdf(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
-    """Parses PDF, handles text extraction and OCR fallback using pdf2image."""
     chunks = []
-    urls = set() # Use set for unique URLs within the PDF
+    urls = set()
+    poppler_available = True # Assume available unless check fails
     try:
-        # Check if poppler is installed (pdf2image depends on it)
-        try:
-            page_count_check = len(convert_from_path(file_path, first_page=1, last_page=1, fmt='jpeg', thread_count=1))
-            if page_count_check < 1: raise ValueError("Test conversion failed")
-            print("[Parser] Poppler (for pdf2image) seems available.")
-            poppler_available = True
-        except (PDFInfoNotInstalledError, FileNotFoundError, ValueError) as poppler_err:
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("!!! WARNING: pdf2image dependency 'poppler' not found or not working. !!!")
-            print("!!!          OCR fallback for image-based PDFs will be skipped.        !!!")
-            print(f"!!!          Error details: {poppler_err}                      !!!")
-            print("!!!          Install 'poppler-utils' (Debian/Ubuntu) or equivalent.  !!!")
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            poppler_available = False
-        except Exception as conversion_err:
-             print(f"[Parser] Warning: Unexpected error during Poppler check: {conversion_err}")
-             poppler_available = False # Assume not available on other errors
-
+        # Optional: Poppler check (can be slow)
+        # try: convert_from_path(file_path, first_page=1, last_page=1); print("[Parser] Poppler available.")
+        # except Exception: poppler_available = False; print("[Parser] WARNING: Poppler not found/working. OCR fallback skipped.")
+        pass # Skip check for speed for now
 
         reader = PdfReader(file_path)
         num_pages = len(reader.pages)
         print(f"[Parser] Processing PDF: {original_name}, Pages: {num_pages}")
-
         for page_num in range(num_pages):
-            page_content = ""
-            ocr_attempted = False
-            page = reader.pages[page_num]
-            print(f"[Parser] --- Page {page_num + 1}/{num_pages} ---")
-
-            # 1. Try direct text extraction
+            page_content = ""; ocr_attempted = False
             try:
+                page = reader.pages[page_num]
                 page_text = page.extract_text()
-                if page_text and page_text.strip():
-                    page_content = page_text
-                    print(f"[Parser] Extracted text directly.")
-                else:
-                     print(f"[Parser] No direct text found.")
-                     page_content = "" # Ensure it's empty if only whitespace
-            except Exception as extract_err:
-                print(f"[Parser] Error during direct text extraction: {extract_err}")
-                page_content = ""
+                if page_text and page_text.strip(): page_content = page_text
+                elif poppler_available: # Try OCR only if text extraction fails and poppler *might* be there
+                    print(f"[Parser] Page {page_num+1}: No text found, attempting OCR...")
+                    ocr_attempted = True
+                    images = convert_from_path(file_path, dpi=200, first_page=page_num + 1, last_page=page_num + 1, fmt='jpeg', thread_count=1)
+                    if images: ocr_text = perform_ocr(images[0]); page_content = ocr_text or ""
+                    if page_content: print(f"[Parser] Page {page_num+1}: OCR successful.")
+                    else: print(f"[Parser] Page {page_num+1}: OCR yielded no text.")
+                else: print(f"[Parser] Page {page_num+1}: No text found, OCR skipped (Poppler unavailable?).")
 
-            # 2. If no text found and poppler is available, try OCR
-            if not page_content and poppler_available:
-                ocr_attempted = True
-                print(f"[Parser] Attempting OCR fallback...")
-                try:
-                    # Convert current page to a PIL Image object
-                    images = convert_from_path(
-                        file_path,
-                        dpi=200, # Resolution for OCR
-                        first_page=page_num + 1,
-                        last_page=page_num + 1,
-                        fmt='jpeg', # Format for PIL
-                        thread_count=1 # Process one page at a time
-                    )
-                    if images:
-                        # Pass the PIL image directly to OCR function
-                        ocr_text = perform_ocr(images[0])
-                        if ocr_text:
-                            page_content = ocr_text
-                            print(f"[Parser] OCR successful.")
-                        else:
-                            print(f"[Parser] OCR completed but no text found.")
-                    else:
-                         print(f"[Parser] pdf2image conversion yielded no image for page.")
+            except PDFInfoNotInstalledError: # Catch specific poppler error here
+                 print("[Parser] WARNING: Poppler not installed - Skipping OCR attempt for PDF page.")
+                 poppler_available = False # Don't try again for this PDF
+            except Exception as page_err: print(f"[Parser] Error processing page {page_num+1}: {page_err}")
 
-                except Exception as ocr_err:
-                    print(f"[Parser] ERROR during OCR fallback for page {page_num + 1}: {ocr_err}")
-
-
-            # 3. Process the content (either extracted text or OCR result)
             if page_content:
-                page_urls = extract_urls(page_content)
-                urls.update(page_urls) # Add unique URLs found on this page
+                page_urls = extract_urls(page_content); urls.update(page_urls)
                 split_chunks = chunk_text(page_content)
                 for text_chunk in split_chunks:
-                    chunks.append(DocumentChunk(
-                        session_id=session_id,
-                        source=original_name,
-                        text=text_chunk,
-                        page=page_num + 1,
-                        metadata={"parser": "pypdf", "ocr_attempted": ocr_attempted}
-                    ))
-                print(f"[Parser] Added {len(split_chunks)} chunks for page {page_num + 1}. Total Chunks: {len(chunks)}")
-            else:
-                 print(f"[Parser] No content (text or OCR) found for page {page_num + 1}.")
+                    chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, page=page_num + 1, metadata={"parser": "pdf", "ocr_attempted": ocr_attempted}))
+    except Exception as e: print(f"[Parser] ERROR Failed to process PDF {original_name}: {e}"); traceback.print_exc()
+    return chunks, list(urls)
 
-
-    except Exception as e:
-        print(f"[Parser] ERROR Failed to process PDF {original_name}: {e}")
-        import traceback
-        traceback.print_exc()
-
-    return chunks, list(urls) # Return unique URLs found across all pages
-
-# --- Other Parsing Functions (_parse_docx, _parse_txt, _parse_image) remain the same ---
-# Copy them here if they weren't in the previous update, otherwise this is fine
-
+# --- DOCX Parsing ---
 async def _parse_docx(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
-    """Parses DOCX files."""
-    chunks = []
-    urls = set()
+    chunks = []; urls = set()
     try:
-        doc = docx.Document(file_path)
-        print(f"[Parser] Processing DOCX: {original_name}")
-        full_text = "\n".join([para.text for para in doc.paragraphs if para.text])
+        doc = docx.Document(file_path); print(f"[Parser] Processing DOCX: {original_name}")
+        full_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        # TODO: Could potentially extract text from tables as well
         if full_text:
             urls.update(extract_urls(full_text))
             split_chunks = chunk_text(full_text)
-            for text_chunk in split_chunks:
-                chunks.append(DocumentChunk(
-                    session_id=session_id,
-                    source=original_name,
-                    text=text_chunk,
-                    metadata={"parser": "python-docx"}
-                ))
-    except Exception as e:
-        print(f"[Parser] ERROR Failed to read DOCX {original_name}: {e}")
+            for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": "docx"}))
+    except Exception as e: print(f"[Parser] ERROR Failed to read DOCX {original_name}: {e}")
     return chunks, list(urls)
 
+# --- PPTX Parsing ---
+async def _parse_pptx(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
+    chunks = []; urls = set()
+    try:
+        prs = Presentation(file_path); print(f"[Parser] Processing PPTX: {original_name}")
+        full_text = ""
+        for i, slide in enumerate(prs.slides):
+            slide_text = f"--- Slide {i+1} ---\n"
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    slide_text += shape.text + "\n"
+            # Also check notes slide
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame and slide.notes_slide.notes_text_frame.text.strip():
+                 slide_text += "\nNotes:\n" + slide.notes_slide.notes_text_frame.text + "\n"
+            full_text += slide_text + "\n"
+
+        if full_text:
+            urls.update(extract_urls(full_text))
+            split_chunks = chunk_text(full_text) # Chunk the entire presentation text
+            for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": "pptx"}))
+    except Exception as e: print(f"[Parser] ERROR Failed to read PPTX {original_name}: {e}")
+    return chunks, list(urls)
+
+# --- TXT Parsing ---
 async def _parse_txt(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
-    """Parses plain text files."""
-    chunks = []
-    urls = set()
+    chunks = []; urls = set()
     try:
         print(f"[Parser] Processing TXT: {original_name}")
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            full_text = f.read()
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f: full_text = f.read()
         if full_text:
             urls.update(extract_urls(full_text))
             split_chunks = chunk_text(full_text)
-            for text_chunk in split_chunks:
-                chunks.append(DocumentChunk(
-                    session_id=session_id,
-                    source=original_name,
-                    text=text_chunk,
-                    metadata={"parser": "text"}
-                ))
-    except Exception as e:
-        print(f"[Parser] ERROR Failed to read TXT {original_name}: {e}")
+            for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": "text"}))
+    except Exception as e: print(f"[Parser] ERROR Failed to read TXT {original_name}: {e}")
     return chunks, list(urls)
 
+# --- Image Parsing (OCR) ---
 async def _parse_image(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
-    """Handles image files using OCR."""
-    chunks = []
-    urls = set()
+    chunks = []; urls = set()
     print(f"[Parser] Processing Image for OCR: {original_name}")
     ocr_text = perform_ocr(file_path)
     if ocr_text:
         urls.update(extract_urls(ocr_text))
         split_chunks = chunk_text(ocr_text)
-        for text_chunk in split_chunks:
-            chunks.append(DocumentChunk(
-                session_id=session_id,
-                source=original_name,
-                text=text_chunk,
-                metadata={"parser": "ocr"}
-            ))
-    else:
-        print(f"[Parser] No text extracted via OCR from {original_name}")
+        for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": "ocr"}))
+    else: print(f"[Parser] No text extracted via OCR from {original_name}")
     return chunks, list(urls)
 
-# --- Main Parsing Function ---
-async def process_document(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str]]:
-    """Routes file processing based on extension."""
+# --- Structured Data Parsing (CSV, XLSX, JSON) ---
+def generate_df_summary(df: pd.DataFrame, filename: str) -> str:
+    """Creates a textual summary of a pandas DataFrame."""
+    summary = f"Summary for {filename}:\n"
+    buffer = io.StringIO()
+    df.info(buf=buffer)
+    summary += "Schema/Info:\n" + buffer.getvalue() + "\n"
+    summary += "First 5 Rows:\n" + df.head().to_string() + "\n"
+    # Could add more: df.describe().to_string() for numerical stats
+    return summary
+
+async def _parse_structured(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str], Optional[pd.DataFrame]]:
+    """Parses CSV, XLSX, JSON into DataFrame and generates summary."""
+    chunks = []; urls = set(); df = None
+    file_extension = os.path.splitext(original_name)[1].lower()
+    print(f"[Parser] Processing Structured Data ({file_extension}): {original_name}")
+    try:
+        if file_extension == '.csv':
+            df = pd.read_csv(file_path)
+        elif file_extension == '.xlsx':
+            df = pd.read_excel(file_path)
+        elif file_extension == '.json':
+            # Try loading common JSON structures (list of records or single object)
+            try: df = pd.read_json(file_path, orient='records', lines=True) # Try lines first
+            except ValueError: df = pd.read_json(file_path, orient='records') # Try standard records array
+            except Exception: # Fallback for complex/nested JSON
+                 with open(file_path, 'r') as f: raw_json_text = f.read()
+                 # Just chunk the raw JSON text if pandas fails
+                 split_chunks = chunk_text(raw_json_text); df=None
+                 for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": "json_raw"}))
+                 print("[Parser] Parsed JSON as raw text.")
+                 return chunks, list(urls), df # Return early if raw parse
+
+        if df is not None:
+            summary_text = generate_df_summary(df, original_name)
+            urls.update(extract_urls(summary_text)) # Unlikely but check summary
+            split_chunks = chunk_text(summary_text) # Chunk the summary
+            for text_chunk in split_chunks: chunks.append(DocumentChunk(session_id=session_id, source=original_name, text=text_chunk, metadata={"parser": f"structured_{file_extension}", "is_summary": True}))
+            print(f"[Parser] Generated {len(split_chunks)} summary chunks for {original_name}.")
+
+    except Exception as e:
+        print(f"[Parser] ERROR Failed to read structured data {original_name}: {e}")
+        df = None # Ensure df is None on error
+
+    return chunks, list(urls), df
+
+
+# --- Main Processing Function ---
+# Add DataFrame storage to return value
+async def process_document(file_path: str, original_name: str, session_id: str) -> Tuple[List[DocumentChunk], List[str], Optional[pd.DataFrame]]:
+    """
+    Routes file processing based on extension.
+    Returns chunks, unique URLs, and DataFrame (for structured types).
+    """
+    import traceback # Ensure traceback is imported here too
     print(f"[Parser Service] Routing: {original_name} (Session: {session_id})")
     file_extension = os.path.splitext(original_name)[1].lower()
-    chunks = []
-    urls = [] # Now stores unique URLs gathered from sub-parsers
+    chunks = []; urls = []; dataframe = None
 
     try:
         if file_extension == '.pdf':
-            chunks, urls_list = await _parse_pdf(file_path, original_name, session_id)
-            urls.extend(urls_list) # Use extend for list
+            chunks, urls = await _parse_pdf(file_path, original_name, session_id)
         elif file_extension == '.docx':
-             chunks, urls_list = await _parse_docx(file_path, original_name, session_id)
-             urls.extend(urls_list)
+             chunks, urls = await _parse_docx(file_path, original_name, session_id)
+        elif file_extension == '.pptx':
+             chunks, urls = await _parse_pptx(file_path, original_name, session_id)
         elif file_extension == '.txt':
-             chunks, urls_list = await _parse_txt(file_path, original_name, session_id)
-             urls.extend(urls_list)
+             chunks, urls = await _parse_txt(file_path, original_name, session_id)
         elif file_extension in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif']:
-            chunks, urls_list = await _parse_image(file_path, original_name, session_id)
-            urls.extend(urls_list)
-        # Add elif blocks for other formats here if needed
+            chunks, urls = await _parse_image(file_path, original_name, session_id)
+        elif file_extension in ['.csv', '.xlsx', '.json']:
+             chunks, urls, dataframe = await _parse_structured(file_path, original_name, session_id)
         else:
             print(f"[Parser Service] Warning: Unsupported file type '{file_extension}' for {original_name}")
 
-        unique_urls = sorted(list(set(urls))) # Ensure final list is unique
-        print(f"[Parser Service] Finished processing {original_name}. Found {len(chunks)} chunks, {len(unique_urls)} unique URLs.")
+        unique_urls = sorted(list(set(urls))) # Ensure unique URLs
+        print(f"[Parser Service] Finished processing {original_name}. Found {len(chunks)} chunks, {len(unique_urls)} unique URLs. DataFrame generated: {dataframe is not None}")
 
     except Exception as e:
          print(f"[Parser Service] CRITICAL ERROR during processing of {original_name}: {e}")
-         import traceback
          traceback.print_exc()
 
-    return chunks, unique_urls # Return chunks and unique URLs
+    # Return DataFrame only for structured types
+    return chunks, unique_urls, dataframe if file_extension in ['.csv', '.xlsx', '.json'] else None
 

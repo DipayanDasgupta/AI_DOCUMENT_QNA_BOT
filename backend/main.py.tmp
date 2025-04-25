@@ -1,0 +1,11 @@
+from fastapi import FastAPI, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import os
+
+# Corrected imports: 'app' is now a sub-directory
+from app.core.config import settings
+from app.api.endpoints import upload, query # Import endpoint routers
+
+# --- Simple In-Memory Store for Session Status ---
+# WARNING: Lost on server restart!

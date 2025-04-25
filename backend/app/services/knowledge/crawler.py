@@ -1,66 +1,47 @@
 import trafilatura
+from trafilatura.settings import use_config
 from typing import Optional, List
 import asyncio
+import traceback
 
 from app.core.config import settings
 from app.models.data_models import DocumentChunk
-from app.services.text_splitter import chunk_text # Still use our chunker
+from app.services.text_splitter import chunk_text
 
-async def fetch_and_parse_url(url: str, session_id: str, depth: int = 0) -> Optional[List[DocumentChunk]]:
-    """
-    Fetches content from a URL using Trafilatura, extracts main text,
-    chunks it, and returns DocumentChunks.
-    """
-    if depth > settings.CRAWLER_MAX_DEPTH:
-        print(f"[Crawler] Max depth ({settings.CRAWLER_MAX_DEPTH}) reached for URL: {url}")
-        return None
-
-    print(f"[Crawler] Fetching and extracting URL (Depth {depth}) using Trafilatura: {url}")
-    parsed_chunks = []
-
+async def fetch_and_extract_url_trafilatura(url: str) -> Optional[str]:
+    """Fetches URL content and extracts main text using Trafilatura."""
+    downloaded = None
+    extracted_text = None
+    loop = asyncio.get_running_loop()
+    print(f"[Crawler] Fetching URL with Trafilatura: {url}")
     try:
-        # Use asyncio's event loop to run the blocking Trafilatura fetch/extract
-        loop = asyncio.get_running_loop()
-
-        # 1. Fetch the URL (Trafilatura handles redirects, basic fetching)
-        # Consider adding timeout configuration to fetch_url if needed
+        # Run synchronous Trafilatura fetch in executor thread
+        # REMOVED the timeout argument as it's invalid for fetch_url
         downloaded = await loop.run_in_executor(None, lambda: trafilatura.fetch_url(url))
 
-        if downloaded is None:
-            print(f"[Crawler] ERROR: Trafilatura failed to fetch URL: {url}")
-            return None
+        if downloaded:
+            print(f"[Crawler] Fetch successful for {url}. Extracting main content...")
+            extracted_text = await loop.run_in_executor(
+                 None,
+                 lambda: trafilatura.extract(downloaded, url=url, include_comments=False, include_tables=False, favour_precision=False)
+            )
+            if extracted_text: print(f"[Crawler] Extracted text from {url}. Length: {len(extracted_text)}")
+            else: print(f"[Crawler] Trafilatura extracted no main content from {url}")
+        else: print(f"[Crawler] Trafilatura failed to fetch URL (returned None): {url}")
+    except Exception as e: print(f"[Crawler] ERROR: Trafilatura processing failed for URL {url}: {e}")
+    return extracted_text
 
-        # 2. Extract main text content
-        # include_comments=False, include_tables=True (optional, default is False)
-        # target_language='en' (optional, helps focus extraction)
-        extracted_text = await loop.run_in_executor(None, lambda: trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=False, # Usually ignore tables for general text Q&A
-            output_format='txt', # Ensure plain text output
-            # url=url # Providing URL might help extraction
-        ))
-
-        if extracted_text and extracted_text.strip():
-            print(f"[Crawler] Extracted text from {url} using Trafilatura. Length: {len(extracted_text)}")
-            # 3. Chunk the extracted text
-            split_chunks = chunk_text(extracted_text)
+async def crawl_and_chunk_url(url: str, session_id: str, depth: int = 0) -> Optional[List[DocumentChunk]]:
+    """Fetches, extracts text using Trafilatura, chunks it, returns DocumentChunks."""
+    if depth > settings.CRAWLER_MAX_DEPTH: return None
+    main_text = await fetch_and_extract_url_trafilatura(url)
+    parsed_chunks = []
+    if main_text:
+        try:
+            split_chunks = chunk_text(main_text)
             for text_chunk in split_chunks:
-                 parsed_chunks.append(DocumentChunk(
-                     session_id=session_id,
-                     source=url, # Use URL as the source
-                     text=text_chunk,
-                     metadata={"parser": "trafilatura_crawler", "depth": depth}
-                 ))
-            print(f"[Crawler] Created {len(split_chunks)} chunks from crawled content.")
-        else:
-             print(f"[Crawler] Trafilatura extracted no significant text from {url}")
-
-    except Exception as e:
-        # Catch potential errors during fetch or extract
-        print(f"[Crawler] ERROR: Failed processing URL {url} with Trafilatura: {e}")
-        import traceback
-        traceback.print_exc() # Log full traceback
-
+                 parsed_chunks.append(DocumentChunk(session_id=session_id, source=url, text=text_chunk, metadata={"parser": "trafilatura_crawler", "depth": depth}))
+            print(f"[Crawler] Created {len(parsed_chunks)} chunks from {url}.")
+        except Exception as chunk_err: print(f"[Crawler] ERROR chunking crawled text from {url}: {chunk_err}")
+    #else: print(f"[Crawler] No text extracted/fetch failed for {url}.") # Redundant logging
     return parsed_chunks if parsed_chunks else None
-

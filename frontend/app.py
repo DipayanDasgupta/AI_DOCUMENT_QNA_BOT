@@ -6,273 +6,261 @@ import pandas as pd
 import plotly.graph_objects as go
 import json
 import os
-from io import BytesIO
+import time
+import asyncio
 
 # --- Configuration ---
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000") # Default to local backend
-UPLOAD_ENDPOINT = f"{BACKEND_URL}/api/v1/upload" # Corrected endpoint prefix
-ASK_ENDPOINT = f"{BACKEND_URL}/api/v1/ask"       # Corrected endpoint prefix
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+UPLOAD_ENDPOINT = f"{BACKEND_URL}/api/v1/upload"
+ASK_ENDPOINT = f"{BACKEND_URL}/api/v1/ask"
+STATUS_ENDPOINT = f"{BACKEND_URL}/api/v1/status"
 
 # --- Set Page Config FIRST ---
-# Must be the first Streamlit command executed
-st.set_page_config(page_title="AI Document Q&A", layout="wide")
+st.set_page_config(page_title="Mando AI Document Q&A", layout="wide", initial_sidebar_state="expanded")
 
-# --- Custom CSS for Aesthetics ---
-st.markdown("""
-<style>
-    /* Style for user messages */
-    div[data-testid="stChatMessage"][class*="user"] {
-        background-color: #e6f7ff; /* Light blue background */
-        border-radius: 10px;
-        padding: 10px;
-        border: 1px solid #91d5ff;
-        margin-bottom: 10px; /* Add space below user message */
-    }
-    /* Style for assistant messages */
-    div[data-testid="stChatMessage"][class*="assistant"] {
-        background-color: #f0f0f0; /* Light grey background */
-        border-radius: 10px;
-        padding: 10px;
-        border: 1px solid #d9d9d9;
-        margin-bottom: 10px; /* Add space below assistant message */
-    }
-    /* Smaller font for sources */
-    .stCaption {
-        font-size: 0.85em;
-        color: #555; /* Darker grey */
-    }
-    /* Style the expander for sources */
-    .stExpander {
-        border: none !important; /* Remove default border */
-        margin-top: -5px; /* Adjust spacing */
-    }
-    .stExpander header {
-        font-size: 0.9em;
-        color: #333;
-        padding: 2px 0px !important; /* Adjust padding */
-    }
-
-</style>
-""", unsafe_allow_html=True)
+# --- Custom CSS ---
+st.markdown("""<style>...</style>""", unsafe_allow_html=True) # Keep your existing CSS
 
 # --- Helper Functions ---
-
 def display_sources(sources):
-    """Displays the sources list, possibly in an expander."""
     if sources:
         with st.expander("View Sources", expanded=False):
             st.markdown(f"**Answer derived from ({len(sources)} sources):**")
-            for i, source in enumerate(sources):
-                st.caption(f"- {source}") # Numbered list
+            for i, source in enumerate(sources): st.caption(f"- {source}")
 
+def check_backend_status(session_id):
+    # ... (keep existing check_backend_status function) ...
+    if not session_id: return None
+    try:
+        status_url = f"{STATUS_ENDPOINT}/{session_id}"
+        print(f"Frontend: Checking status at {status_url}") # DEBUG
+        response = requests.get(status_url, timeout=15) # Increased timeout slightly
+        response.raise_for_status()
+        status_data = response.json()
+        print(f"Frontend: Status received: {status_data}") # DEBUG
+        return status_data
+    except requests.exceptions.Timeout: print("Frontend: Status check timed out."); return {"status": "timeout", "message": "Status check timed out."}
+    except requests.exceptions.RequestException as e:
+        print(f"Frontend: Status check failed: {e}")
+        status_code = e.response.status_code if hasattr(e, 'response') else 500
+        if status_code == 404: return {"status": "not_found", "message": "Session ID not found."}
+        else: return {"status": "error", "message": f"Status check request failed: {e}"}
 
 # --- Streamlit App ---
-# Title and markdown now come AFTER set_page_config
 st.title("📄 AI Document Q&A System")
-st.markdown("Upload your documents (PDF, DOCX, PPTX, XLSX, CSV, JSON, TXT, PNG, JPG), then ask questions!")
+st.markdown("Upload documents. Processing includes OCR & Web Crawling.")
 
-# --- Session State Initialization ---
-if "session_id" not in st.session_state:
-    st.session_state.session_id = None
-if "files_ready_for_chat" not in st.session_state:
-    st.session_state.files_ready_for_chat = False
-if "upload_status_message" not in st.session_state:
-    st.session_state.upload_status_message = ""
-if "upload_status_type" not in st.session_state:
-    st.session_state.upload_status_type = "info"
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "uploaded_file_names" not in st.session_state:
-    st.session_state.uploaded_file_names = []
+# --- Session State Init ---
+if "session_id" not in st.session_state: st.session_state.session_id = None
+if "processing_complete" not in st.session_state: st.session_state.processing_complete = False
+if "status_message" not in st.session_state: st.session_state.status_message = "" # Combined status message
+if "is_processing" not in st.session_state: st.session_state.is_processing = False # Simpler flag for polling
+if "messages" not in st.session_state: st.session_state.messages = []
+if "uploaded_file_names" not in st.session_state: st.session_state.uploaded_file_names = []
 
-# --- UI Components ---
-
-# File Uploader and Session Control in the sidebar
+# --- Sidebar ---
 with st.sidebar:
     st.header("Upload Documents")
     uploaded_files = st.file_uploader(
-        "Choose files",
-        accept_multiple_files=True,
+        "Choose files", accept_multiple_files=True,
         type=["pdf", "docx", "pptx", "xlsx", "csv", "json", "txt", "png", "jpg", "jpeg"],
         key="file_uploader"
     )
-
     current_file_names = sorted([f.name for f in uploaded_files]) if uploaded_files else []
 
     # --- Upload Logic ---
     if current_file_names != st.session_state.uploaded_file_names:
-        print("Frontend: Detected file change...")
-        st.session_state.files_ready_for_chat = False
-        st.session_state.messages = []
+        print(f"Frontend: File change detected. Old: {st.session_state.uploaded_file_names}, New: {current_file_names}")
+        # Reset state for new upload
         st.session_state.session_id = None
+        st.session_state.processing_complete = False
+        st.session_state.messages = []
         st.session_state.uploaded_file_names = current_file_names
-        st.session_state.upload_status_message = ""
-        st.session_state.upload_status_type = "info"
+        st.session_state.status_message = ""
+        st.session_state.is_processing = False
 
         if uploaded_files:
-            with st.spinner(f"Uploading {len(uploaded_files)} file(s)..."):
+            st.session_state.status_message = f"Uploading {len(uploaded_files)} file(s)..."
+            st.session_state.is_processing = True # Assume processing starts now
+            # Display initial uploading message immediately
+            st.info(st.session_state.status_message, icon="⏳")
+
+            with st.spinner("Uploading..."): # Spinner only for the actual POST request
                 files_to_send = []
-                for uploaded_file in uploaded_files:
-                    files_to_send.append(("files", (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)))
+                for up_file in uploaded_files: files_to_send.append(("files", (up_file.name, up_file.getvalue(), up_file.type)))
 
                 try:
                     print(f"Frontend: Sending POST to {UPLOAD_ENDPOINT}")
-                    response = requests.post(UPLOAD_ENDPOINT, files=files_to_send, timeout=300)
-                    print(f"Frontend: Received response status: {response.status_code}")
+                    response = requests.post(UPLOAD_ENDPOINT, files=files_to_send, timeout=60) # Generous timeout
+                    print(f"Frontend: Initial upload response status: {response.status_code}")
                     response.raise_for_status()
-
                     result = response.json()
-                    print(f"Frontend: Backend JSON response: {result}")
+                    print(f"Frontend: Initial upload response JSON: {result}")
 
                     session_id_received = result.get("session_id")
                     backend_status = result.get("status")
-                    backend_message = result.get("message")
 
-                    if session_id_received and (backend_status == "processing"):
+                    if session_id_received and backend_status == "processing":
                         st.session_state.session_id = session_id_received
-                        st.session_state.files_ready_for_chat = True
-                        st.session_state.upload_status_message = backend_message or "Files accepted. Processing started..."
-                        st.session_state.upload_status_type = "info"
-                        print(f"Frontend: Upload successful (processing started). Session: {session_id_received}")
-                    else:
-                        error_message = backend_message or "Initiation failed (Invalid backend response)."
-                        st.session_state.upload_status_message = f"❌ File processing initiation failed: {error_message}"
-                        st.session_state.upload_status_type = "error"
+                        st.session_state.status_message = result.get("message", "Processing started...")
+                        st.session_state.is_processing = True # Confirm processing state
+                        print(f"Frontend: Upload successful, Session: {session_id_received}. Polling should start.")
+                    else: # Failed to get session_id or 'processing' status
+                        raise ValueError(f"Backend did not confirm processing start. Response: {result}")
 
-                except requests.exceptions.Timeout:
-                     st.session_state.upload_status_message = "❌ Upload timed out."
-                     st.session_state.upload_status_type = "error"
-                     st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
-                except requests.exceptions.ConnectionError:
-                     st.session_state.upload_status_message = f"❌ Connection Error: Cannot connect to backend at {BACKEND_URL}."
-                     st.session_state.upload_status_type = "error"
-                     st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
-                except requests.exceptions.RequestException as e:
-                    error_msg_detail = f"❌ Upload Error: {e}"
-                    try: error_details = response.json().get("message", response.text)
-                    except Exception: error_details = "(Could not parse error details)"
-                    error_msg_detail += f"\nBackend details: {error_details}"
-                    error_msg_detail += f"\nStatus code: {response.status_code if 'response' in locals() else 'N/A'}"
-                    st.session_state.upload_status_message = error_msg_detail
-                    st.session_state.upload_status_type = "error"
-                    st.session_state.files_ready_for_chat = False; st.session_state.session_id = None
+                except Exception as e:
+                    print(f"Frontend: Upload POST failed: {e}")
+                    st.session_state.status_message = f"❌ Upload failed: {e}"
+                    st.session_state.is_processing = False # Stop processing state on failure
+                    st.session_state.session_id = None # Ensure session_id is cleared
 
-                # Trigger immediate rerun to display status message
-                st.rerun()
+            # Rerun AFTER the upload attempt to display status/start polling check
+            print("Frontend: Rerunning after upload attempt...")
+            st.rerun()
 
+        # Handle case where files are removed (uploader becomes empty)
         elif not uploaded_files:
-            st.session_state.upload_status_message = "Upload documents to begin."
-            st.session_state.upload_status_type = "info"
+             print("Frontend: Files removed.")
+             # State was already reset above
+             st.session_state.status_message = "Upload documents to begin."
+             st.rerun() # Rerun to clear old status messages if any
 
-    # --- Display Status & Uploaded Files ---
-    if st.session_state.upload_status_message:
-        if st.session_state.upload_status_type == "info": st.info(st.session_state.upload_status_message, icon="⏳")
-        elif st.session_state.upload_status_type == "success": st.success(st.session_state.upload_status_message, icon="✅")
-        else: st.error(st.session_state.upload_status_message, icon="❌")
+    # --- Status Display & Polling ---
+    status_container = st.container() # Use a container to manage status display area
+    if st.session_state.get('is_processing', False):
+        with status_container:
+            st.info(st.session_state.get('status_message', 'Processing...'), icon="⏳")
 
-    if st.session_state.session_id and st.session_state.uploaded_file_names:
-        with st.expander("Uploaded Files (Processing Started)", expanded=True):
-            for name in st.session_state.uploaded_file_names: st.caption(name)
+        # Perform status check
+        status_result = check_backend_status(st.session_state.get('session_id'))
 
-    # Session control button
+        if status_result:
+            current_status = status_result.get("status")
+            current_message = status_result.get("message")
+
+            if current_status == "ready":
+                print(f"Frontend: Polling SUCCESS - Status 'ready' for session {st.session_state.session_id}")
+                st.session_state.processing_complete = True
+                st.session_state.is_processing = False
+                st.session_state.status_message = current_message or "✅ Processing complete!"
+                st.success(st.session_state.status_message, icon="✅") # Show final success
+                time.sleep(0.5) # Brief pause before final rerun
+                st.rerun()
+            elif current_status == "error":
+                print(f"Frontend: Polling FAILURE - Status 'error' for session {st.session_state.session_id}")
+                st.session_state.processing_complete = False
+                st.session_state.is_processing = False
+                st.session_state.status_message = f"❌ Processing failed: {current_message or 'Unknown backend error.'}"
+                st.error(st.session_state.status_message, icon="❌") # Show final error
+                # No rerun here, processing stopped
+            elif current_status == "processing":
+                # Update message if backend provided a new one
+                if current_message and current_message != st.session_state.get('status_message'):
+                    st.session_state.status_message = current_message
+                    # Rerun will update the st.info message
+                print(f"Frontend: Polling - Status 'processing'. Message: {current_message}. Will check again...")
+                time.sleep(4) # Poll every 4 seconds
+                st.rerun()
+            else: # timeout, not_found, etc.
+                print(f"Frontend: Polling WARNING - Status '{current_status}' for {st.session_state.session_id}")
+                st.session_state.status_message = f"⚠️ Status check issue: {current_message or current_status}"
+                st.session_state.is_processing = False # Stop polling
+                st.warning(st.session_state.status_message, icon="⚠️")
+                # No rerun here, processing stopped
+        else: # check_backend_status returned None (e.g., initial state)
+             print(f"Frontend: Status check invalid for {st.session_state.session_id}. Stopping poll.")
+             st.session_state.is_processing = False # Ensure polling stops
+             # Potentially add a warning message here
+             st.warning("Could not verify processing status.", icon="⚠️")
+
+    # --- Display final status if processing finished ---
+    elif not st.session_state.get('is_processing', False) and st.session_state.get('status_message'):
+         # Display final success/error/warning messages if polling is complete
+         status_type = "info" # Default
+         if "✅" in st.session_state.status_message: status_type = "success"
+         elif "❌" in st.session_state.status_message: status_type = "error"
+         elif "⚠️" in st.session_state.status_message: status_type = "warning"
+
+         with status_container:
+             if status_type == "success": st.success(st.session_state.status_message, icon="✅")
+             elif status_type == "error": st.error(st.session_state.status_message, icon="❌")
+             elif status_type == "warning": st.warning(st.session_state.status_message, icon="⚠️")
+             # else: st.info(st.session_state.status_message) # Don't show initial "upload..." after completion
+
+    # --- Display Uploaded Files Expander ---
+    if st.session_state.get('session_id') and st.session_state.get('uploaded_file_names'):
+        expander_title = "Uploaded Files"
+        status_icon = ""
+        is_ready = st.session_state.get('processing_complete', False)
+        is_error = "❌" in st.session_state.get('status_message', '')
+
+        if st.session_state.get('is_processing', False): expander_title += " (Processing...)"; status_icon="⏳"
+        elif is_ready and not is_error: expander_title += " (Ready)"; status_icon="✅"
+        elif is_error: expander_title += " (Error)"; status_icon="❌"
+
+        with st.expander(f"{status_icon} {expander_title}", expanded=True):
+            for name in st.session_state.get('uploaded_file_names', []): st.caption(name)
+
+    # --- Clear Session Button ---
     st.markdown("---")
-    if st.button("Clear Session & Start Over"):
-        st.session_state.session_id = None
-        st.session_state.files_ready_for_chat = False
-        st.session_state.messages = []
-        st.session_state.uploaded_file_names = []
-        st.session_state.upload_status_message = ""
-        st.session_state.upload_status_type = "info"
+    if st.button("Clear Session & Start Over", key="clear_session"):
+        print("Frontend: Clearing session state.")
+        st.session_state.clear()
         st.rerun()
 
-    st.markdown("---")
-    st.caption(f"Backend API: {BACKEND_URL}")
+    st.markdown("---"); st.caption(f"Backend API: {BACKEND_URL}")
 
 
 # --- Chat Interface ---
-# Display chat messages from history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        if message["type"] in ["text", "not_found", "error"]:
+message_container = st.container()
+with message_container:
+    # Display chat messages from history
+    for message in st.session_state.get('messages', []):
+        with st.chat_message(message["role"]):
             st.markdown(message["content"])
-        elif message["type"] == "data_table":
-             st.markdown(message["content"])
-             if message.get("data") and isinstance(message["data"], dict) and "rows" in message["data"] and "columns" in message["data"]:
-                 try: df = pd.DataFrame(message["data"]["rows"], columns=message["data"]["columns"]); st.dataframe(df, use_container_width=True)
-                 except Exception as e: st.error(f"Table display error: {e}"); st.json(message.get("data"))
-             else: st.error("Bad table data format"); st.json(message.get("data"))
-        elif message["type"] == "data_chart":
-             st.markdown(message["content"])
-             if message.get("data") and isinstance(message["data"], dict):
-                 try: fig = go.Figure(message["data"]); st.plotly_chart(fig, use_container_width=True)
-                 except Exception as e: st.error(f"Chart display error: {e}"); st.json(message.get("data"))
-             else: st.error("Bad chart data format"); st.json(message.get("data"))
+            if message["role"] == "assistant" and message.get("sources"):
+                display_sources(message["sources"])
 
-        if message["role"] == "assistant" and message.get("sources"): display_sources(message["sources"])
-
-# Chat input for user query
-prompt = st.chat_input("Ask a question about the documents...", disabled=not st.session_state.files_ready_for_chat)
+# Chat input - disable based on processing_complete state
+prompt = st.chat_input("Ask a question...", disabled=not st.session_state.get('processing_complete', False), key="chat_input")
 
 if prompt:
     cleaned_prompt = prompt.strip()
     if not cleaned_prompt: st.warning("Please enter a question.")
-    elif not st.session_state.session_id: st.error("Session ID missing. Please upload documents again.")
+    elif not st.session_state.get('session_id'): st.error("Session ID missing.")
     else:
+        # Add user message state and immediately display in container
         st.session_state.messages.append({"role": "user", "content": cleaned_prompt, "type": "text"})
-        with st.chat_message("user"): st.markdown(cleaned_prompt)
+        with message_container:
+             with st.chat_message("user"): st.markdown(cleaned_prompt)
 
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty(); message_placeholder.markdown("▌")
+        # Get response from backend
+        with st.spinner("Thinking..."):
             full_response_content = ""; sources = []; response_type = "error"; response_data = None
+            try:
+                payload = {"question": cleaned_prompt, "session_id": st.session_state.session_id}
+                print(f"Frontend: Sending POST to {ASK_ENDPOINT} with payload: {payload}")
+                response = requests.post(ASK_ENDPOINT, json=payload, timeout=180)
+                response.raise_for_status()
+                result = response.json()
+                print(f"Frontend: Raw backend response for /ask: {result}")
 
-            with st.spinner("Thinking..."):
-                try:
-                    payload = {"question": cleaned_prompt, "session_id": st.session_state.session_id}
-                    print(f"Frontend: Sending POST to {ASK_ENDPOINT} with payload: {payload}")
-                    response = requests.post(ASK_ENDPOINT, json=payload, timeout=180)
-                    print(f"Frontend: Received ask response status: {response.status_code}")
-                    response.raise_for_status()
+                full_response_content = result.get("answer", "Error: No answer field.")
+                response_type = result.get("type", "error")
+                sources = result.get("sources", [])
 
-                    result = response.json()
-                    print(f"Frontend: Raw backend response for /ask:")
+            except Exception as e:
+                error_msg = f"❌ Error asking question: {e}"
+                try: error_details = response.json().get("detail", response.text)
+                except Exception: error_details = "(Could not parse backend error details)"
+                error_msg += f"\nBackend: {error_details}\nStatus code: {response.status_code if 'response' in locals() else 'N/A'}"
+                full_response_content = error_msg # Set error content
 
-                    full_response_content = result.get("answer", "Error: No answer field in response.")
-                    response_type = result.get("type", "error")
-                    sources = result.get("sources", [])
-                    response_data = result.get("data") or result.get("chart_data")
-
-                    message_placeholder.empty() # Clear thinking indicator
-
-                    if response_type in ["text", "not_found", "error"]: st.markdown(full_response_content)
-                    elif response_type == "data_table":
-                        st.markdown(full_response_content)
-                        if response_data and isinstance(response_data, dict) and "rows" in response_data and "columns" in response_data:
-                            try: df = pd.DataFrame(response_data["rows"], columns=response_data["columns"]); st.dataframe(df, use_container_width=True)
-                            except Exception as e: st.error(f"Table display error: {e}"); st.json(response_data or "Missing data field")
-                        else: st.error("Bad table data format"); st.json(response_data or "Missing data field")
-                    elif response_type == "data_chart":
-                        st.markdown(full_response_content)
-                        if response_data and isinstance(response_data, dict):
-                            try: fig = go.Figure(response_data); st.plotly_chart(fig, use_container_width=True)
-                            except Exception as e: st.error(f"Chart display error: {e}"); st.json(response_data or "Missing data field")
-                        else: st.error("Bad chart data format"); st.json(response_data or "Missing data field")
-                    else:
-                         st.error(f"Received unknown response type from backend: {response_type}"); st.json(result)
-                         response_type = "error"
-
-                    if response_type != "error": display_sources(sources)
-
-                except requests.exceptions.Timeout:
-                    message_placeholder.error("❌ Error: Backend timed out answering."); response_type = "error"; full_response_content = "Timeout"
-                except requests.exceptions.ConnectionError:
-                    message_placeholder.error(f"❌ Connection Error to backend."); response_type = "error"; full_response_content = "Connection Error"
-                except requests.exceptions.RequestException as e:
-                    error_msg = f"❌ Error asking question: {e}"
-                    try: error_details = response.json().get("message", response.text); error_msg += f"\nBackend: {error_details}"
-                    except Exception: error_msg += f"\nStatus code: {response.status_code if 'response' in locals() else 'N/A'}"
-                    message_placeholder.error(error_msg); response_type = "error"; full_response_content = error_msg
-
+            # Add assistant response (success or error) to state
             st.session_state.messages.append({
                 "role": "assistant", "content": full_response_content, "type": response_type,
-                "data": response_data, "sources": sources if response_type != "error" else []
+                "data": None, "chart_data": None,
+                "sources": sources if response_type != "error" else []
             })
+        # Rerun to display the new assistant message from state
+        st.rerun()

@@ -1,71 +1,65 @@
-from fastapi import FastAPI, APIRouter
+# backend/main.py
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
+from typing import Dict, Any # Keep Dict, Any
 
-# Corrected imports: 'app' is now a sub-directory
+# Import state store
+from app.core import state as app_state # Import the new state module
 from app.core.config import settings
 from app.api.endpoints import upload, query # Import endpoint routers
+from app.api.endpoints import status as status_endpoint # Added status endpoint
 
-# --- Lifespan Function (optional: for setup/teardown like loading models) ---
+# --- Lifespan Function ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
     print("Starting up backend server...")
-    # Ensure necessary directories exist (using paths from settings)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    os.makedirs(settings.INDEX_DIR, exist_ok=True) # Use INDEX_DIR from config
+    os.makedirs(settings.INDEX_DIR, exist_ok=True)
 
-    # TODO: Load models (e.g., embedding model) if needed on startup
-    # print("Loading embedding model...")
-    # app.state.embedder = load_my_embedding_model() # Example
-    # print("Model loaded.")
+    # Initialize stores if needed (they are global dicts, so already exist)
+    # You could add logic here to load state from disk if implementing persistence
+    app_state.session_status_store.clear() # Ensure store is empty on startup
+
+    if not settings.TAVILY_API_KEY: print("WARNING: TAVILY_API_KEY not set. Web search will be disabled.")
     print("[Lifespan] Backend setup complete.")
-    yield # API is ready to serve requests
+    yield # API ready
 
     # --- Shutdown ---
     print("Shutting down backend server...")
-    # Add any cleanup logic here
 
 # --- FastAPI App Instance ---
-# Pass lifespan context manager to FastAPI app
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    lifespan=lifespan # Register lifespan manager
+    lifespan=lifespan
 )
 
 # --- API Router Setup ---
-# The router imports within endpoints/upload.py etc. should still work
-# as they use relative imports like 'from app.core...' which find 'app'
-# because the execution context starts relative to 'backend' now.
 api_router = APIRouter()
-# Include routers from the 'app' sub-package
 api_router.include_router(upload.router, prefix="/upload", tags=["Upload"])
 api_router.include_router(query.router, prefix="/ask", tags=["Query"])
+api_router.include_router(status_endpoint.router, prefix="/status", tags=["Status"]) # This import is now safe
 
-# Mount the main API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
-# --- Root Endpoint (optional: for health check) ---
+# --- Root Endpoint ---
 @app.get("/", tags=["Root"])
 async def read_root():
     return {"message": f"Welcome to {settings.PROJECT_NAME}"}
 
-# --- Allow CORS (Cross-Origin Resource Sharing) for Frontend ---
-# IMPORTANT: Adjust origins as needed for deployment
+# --- CORS Middleware ---
 origins = [
-    "http://localhost",      # Base localhost
-    "http://localhost:8501", # Default Streamlit port
-    # Add the deployed frontend URL here if applicable
-    # "*" # Allows all origins (use with caution)
+    "http://localhost",
+    "http://localhost:8501",
+    # "*" # Uncomment for testing if needed, but be specific for production
 ]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins, # Or ["*"] for testing
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-

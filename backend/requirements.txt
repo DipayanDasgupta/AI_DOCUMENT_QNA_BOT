@@ -8,34 +8,37 @@ pydantic-settings>=2.0
 # Environment Variable Loading
 python-dotenv>=1.0.0
 
-google-generativeai>=0.4.0 # Google Gemini
+# LLM Integration
+google-generativeai>=0.4.0
 
 # --- Implementation Dependencies ---
 
 # Parsing
-pypdf>=4.0.0 # PDF parsing (successor to PyPDF2)
-python-docx>=1.1.0 # DOCX parsing
-pdf2image>=1.16.0
-# python-pptx # Add if needed
-# openpyxl # Add if needed
+pypdf>=4.0.0
+python-docx>=1.1.0
+python-pptx>=0.6.23 # Added for PPTX
+pandas>=1.5.0      # Added for CSV, XLSX, JSON + structured data
+openpyxl>=3.1.0    # Added for reading XLSX with pandas
 
 # OCR
-pillow>=9.5.0 # Image handling
-pytesseract>=0.3.10 # Tesseract wrapper
+pillow>=9.5.0
+pytesseract>=0.3.10
+opencv-python-headless>=4.5.0 # For preprocessing
+pdf2image>=1.16.0           # For PDF OCR fallback
 
-# Web Crawling
+# Web Crawling (Robust Extraction)
 requests>=2.28.0
 beautifulsoup4>=4.12.0
-trafilatura>=1.8.0
-# lxml # Optional: Faster HTML parsing with bs4
+trafilatura[all]>=1.8.0 # Use [all] for extras like lxml
 
 # Embeddings & Vector Store
 sentence-transformers>=2.2.0
-faiss-cpu>=1.7.4 # Use faiss-gpu if you have CUDA setup
-numpy>=1.22.0 # Required by FAISS and sentence-transformers
+faiss-cpu>=1.7.4 # Or faiss-gpu
+numpy>=1.22.0
 
 # Text processing / Utilities
-nltk>=3.8 # For basic text splitting (sentence tokenization)
-# regex # Potentially better regex handling than standard 're'
+nltk>=3.8
+# regex # Optional
 
-opencv-python-headless>=4.5.0
+# Web Search RAG
+tavily-python>=0.3.3
